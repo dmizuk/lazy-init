@@ -12,6 +12,7 @@
 //! memory barrier).
 
 use std::cell::UnsafeCell;
+use std::ptr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,7 +29,7 @@ pub struct LazyTransform<T, U>
 {
     initialized: AtomicBool,
     lock: Mutex<()>,
-    value: UnsafeCell<Option<ThisOrThat<T, U>>>,
+    value: UnsafeCell<ThisOrThat<T, U>>,
 }
 
 // Implementation details.
@@ -36,12 +37,11 @@ impl<T, U> LazyTransform<T, U>
     where T: Sync,
           U: Sync
 {
-    fn extract(&self) -> Option<&U> {
+    fn extract(&self) -> &U {
         // Make sure we're initialized first!
-        match unsafe { (*self.value.get()).as_ref() } {
-            None => None,
-            Some(&ThisOrThat::This(_)) => panic!(), // Should already be initialized!
-            Some(&ThisOrThat::That(ref that)) => Some(that),
+        match *unsafe { &*self.value.get() } {
+            ThisOrThat::This(_) => panic!(), // Should already be initialized!
+            ThisOrThat::That(ref that) => that,
         }
     }
 }
@@ -57,7 +57,7 @@ impl<T, U> LazyTransform<T, U>
         LazyTransform {
             initialized: AtomicBool::new(false),
             lock: Mutex::new(()),
-            value: UnsafeCell::new(Some(ThisOrThat::This(t))),
+            value: UnsafeCell::new(ThisOrThat::This(t)),
         }
     }
 
@@ -81,12 +81,14 @@ impl<T, U> LazyTransform<T, U>
                 // Ok, we're definitely uninitialized.
                 // Safe to fiddle with the UnsafeCell now, because we're locked,
                 // and there can't be any outstanding references.
-                let value = unsafe { &mut *self.value.get() };
-                let this = match value.take().unwrap() {
-                    ThisOrThat::This(t) => t,
-                    ThisOrThat::That(_) => panic!(), // Can't already be initialized!
-                };
-                *value = Some(ThisOrThat::That(f(this)));
+                let value = self.value.get();
+                unsafe {
+                    let this = match ptr::read(value) {
+                        ThisOrThat::This(t) => t,
+                        ThisOrThat::That(_) => panic!(), // Can't already be initialized!
+                    };
+                    ptr::write(value, ThisOrThat::That(f(this)));
+                }
                 self.initialized.store(true, Ordering::Release);
             } else {
                 // We raced, and someone else initialized us. We can fall
@@ -95,7 +97,7 @@ impl<T, U> LazyTransform<T, U>
         }
 
         // We're initialized, our value is immutable, no synchronization needed.
-        self.extract().unwrap()
+        self.extract()
     }
 
     /// Get a reference to the transformed value, returning `Some(&U)` if the
@@ -105,7 +107,7 @@ impl<T, U> LazyTransform<T, U>
     pub fn get(&self) -> Option<&U> {
         if self.initialized.load(Ordering::Acquire) {
             // We're initialized, our value is immutable, no synchronization needed.
-            self.extract()
+            Some(self.extract())
         } else {
             None
         }
