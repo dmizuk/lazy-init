@@ -12,6 +12,7 @@
 //! memory barrier).
 
 use std::cell::UnsafeCell;
+use std::mem;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -67,8 +68,8 @@ impl<T, U> LazyTransform<T, U>
     /// will invoke its closure, and every call will receive a reference to the
     /// newly transformed value.
     ///
-    /// The closure can only ever be called once, so think carefully about what
-    /// transformation you want to apply!
+    /// The closure can only ever be called once (unless you explicitly call `reset`
+    /// method), so think carefully about what transformation you want to apply!
     pub fn get_or_create<F>(&self, f: F) -> &U
         where F: FnOnce(T) -> U
     {
@@ -108,6 +109,21 @@ impl<T, U> LazyTransform<T, U>
             self.extract()
         } else {
             None
+        }
+    }
+
+    /// Untransform the `LazyTransform<T, U>` with an argument of type `T`, and
+    /// returns the previously contained value.
+    pub fn reset(&mut self, t: T) -> Result<U, T> {
+        // This is safe because the mutable reference to `self` guarantees that no
+        // other references to the value exist.
+        let old = unsafe {
+            mem::replace(&mut *self.value.get(), Some(ThisOrThat::This(t)))
+        };
+        *self.initialized.get_mut() = false;
+        match old.unwrap() {
+            ThisOrThat::This(t) => Err(t),
+            ThisOrThat::That(u) => Ok(u),
         }
     }
 }
